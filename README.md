@@ -134,7 +134,7 @@ Leader **rebalances** all segments again:
 
 ---
 
-###� Step 4 — Node Fails (node2 leaves)
+### Step 4 — Node Fails (node2 leaves)
 
 ```shell
 Active nodes: [node1, node3]
