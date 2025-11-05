@@ -1,4 +1,4 @@
-# 🧠 Distributed Worker Cluster (Example)
+# Distributed Worker Cluster (Example)
 
 > ⚠️ **Disclaimer:**  
 > This repository is an **example implementation** of a distributed coordination system for workers built with **.NET** and **etcd**.  
@@ -7,7 +7,7 @@
 
 ---
 
-## 🎯 System Goal
+## System Goal
 
 This system models a **distributed cluster of worker nodes** that cooperate without central orchestration.  
 The main objective is to ensure that:
@@ -22,7 +22,7 @@ In other words — it’s an **example of distributed coordination** and **confl
 
 ---
 
-## ⚙️ System Requirements
+## System Requirements
 
 | Requirement | Description |
 |--------------|-------------|
@@ -35,11 +35,11 @@ In other words — it’s an **example of distributed coordination** and **confl
 
 ---
 
-## 🧩 How This Project Solves It (Using etcd)
+## How This Project Solves It (Using etcd)
 
 | Mechanism | Component | Description |
 |------------|------------|-------------|
-| **Consensus & Coordination** | 🧱 [etcd](https://etcd.io/) | Serves as the distributed key–value store and consensus system. |
+| **Consensus & Coordination** | [etcd](https://etcd.io/) | Serves as the distributed key–value store and consensus system. |
 | **Node Liveness Tracking** | `LeaseManagerService` | Each node acquires and renews an etcd **lease** — its presence in the cluster depends on it. |
 | **Leader Election** | `LeaderElectionService` | Uses etcd’s **election API** — one node becomes the leader, others are followers. |
 | **Cluster State Management** | `ClusterState` + `WatchService` | Watches etcd for node joins/leaves and updates local state reactively. |
@@ -49,7 +49,7 @@ In other words — it’s an **example of distributed coordination** and **confl
 
 ---
 
-## 🧠 How It Works (Step by Step)
+## How It Works (Step by Step)
 
 1. **Startup**  
    Each node starts, connects to etcd, and requests a **lease** to represent its liveness.
@@ -72,4 +72,105 @@ In other words — it’s an **example of distributed coordination** and **confl
 
 6. **Failure & Recovery**  
    If the leader fails or loses its lease, the cluster elects a **new leader**, which redistributes segments accordingly.
+
+---
+
+## Example: Segment Distribution in Action
+
+Let’s see how the system behaves step by step when nodes join and leave the cluster.
+
+### Initial State
+
+There are **10 total segments**:  
+`[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]`
+
+---
+
+### Step 1 — One Node Joins
+
+```shell
+Active nodes: [node1]
+Leader: node1
+```
+
+**Leader node1** assigns all segments to itself:
+
+| Node   | Segments   |
+|---------|------------|
+| node1   | [0–9]      |
+
+---
+
+###� Step 2 — Second Node Joins
+
+```shell
+Active nodes: [node1, node2]
+Leader: node1
+```
+
+Leader detects a cluster change and **redistributes segments evenly**:
+
+| Node   | Segments   |
+|---------|------------|
+| node1   | [0–4]      |
+| node2   | [5–9]      |
+
+---
+
+### Step 3 — Third Node Joins
+
+```shell
+Active nodes: [node1, node2, node3]
+Leader: node1
+```
+
+Leader **rebalances** all segments again:
+
+| Node   | Segments   |
+|---------|------------|
+| node1   | [0–3]      |
+| node2   | [4–6]      |
+| node3   | [7–9]      |
+
+---
+
+###� Step 4 — Node Fails (node2 leaves)
+
+```shell
+Active nodes: [node1, node3]
+Leader: node1
+```
+
+etcd detects the lease expiration for `node2` → leader redistributes segments:
+
+| Node   | Segments   |
+|---------|------------|
+| node1   | [0–4]      |
+| node3   | [5–9]      |
+
+---
+
+### Step 5 — Leader Fails (node1 goes down)
+
+```shell
+Active nodes: [node3]
+Leader election triggered...
+```
+
+A new leader is **elected via etcd election API**:  
+→ `node3` becomes the **leader**  
+→ Redistributes all segments to itself:
+
+| Node   | Segments   |
+|---------|------------|
+| node3   | [0–9]      |
+
+---
+
+### Key Takeaways
+
+- Segment assignments are **stored in etcd** under `cluster/segments`  
+- When cluster membership changes, the **leader recalculates** the distribution  
+- Other nodes **watch etcd** and update their local assignments automatically  
+- Only one node (the leader) performs coordination, ensuring **consensus** and **no duplicate processing**
 
