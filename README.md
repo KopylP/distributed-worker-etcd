@@ -1,8 +1,8 @@
 # Distributed Worker Cluster (Example)
 
-> ⚠️ **Disclaimer:**  
+> **Disclaimer:**  
 > This repository is an **example implementation** of a distributed coordination system for workers built with **.NET** and **etcd**.  
-> It is designed for **educational and illustrative purposes only** — **not production-ready**.  
+> It is designed for **illustrative purposes only**.  
 > The goal is to demonstrate how workers can **scale horizontally** and **process distinct work segments without conflicts** by achieving **distributed consensus** via etcd.
 
 ---
