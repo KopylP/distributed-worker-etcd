@@ -101,7 +101,7 @@ Leader: node1
 
 ---
 
-###� Step 2 — Second Node Joins
+### Step 2 — Second Node Joins
 
 ```shell
 Active nodes: [node1, node2]
