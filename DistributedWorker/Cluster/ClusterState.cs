@@ -6,13 +6,12 @@ namespace DistributedWorker.Cluster;
 public class ClusterState
 {
     private readonly object _lock = new();
-    private readonly HashSet<string> _knownNodes = new();
-    private List<int> _mySegments = new();
+    private readonly HashSet<string> _knownNodes = [];
+    private List<int> _mySegments = [];
     private long _leaseId;
     private bool _hasLease;
     private bool _isLeader;
 
-    // 🔄 Події стану
     private readonly Channel<bool> _clusterChanged = Channel.CreateUnbounded<bool>();
     private readonly Channel<bool> _processingStateChanged = Channel.CreateUnbounded<bool>();
 
@@ -101,11 +100,9 @@ public class ClusterState
             _clusterChanged.Writer.TryWrite(true);
     }
 
-    // --- Канали (читачі) ---
     public ChannelReader<bool> ClusterChanged => _clusterChanged.Reader;
     public ChannelReader<bool> ProcessingStateChanged => _processingStateChanged.Reader;
 
-    // --- Приватні допоміжні методи ---
     private void SetLeaseId(long value)
     {
         lock (_lock)
