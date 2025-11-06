@@ -1,0 +1,9 @@
+﻿services:
+  distributed-worker:
+    build:
+      context: .
+      dockerfile: DistributedWorker/Dockerfile
+    deploy:
+      replicas: 3
+    environment:
+      - DW_ConnectionStrings__Etcd=http://host.docker.internal:2379

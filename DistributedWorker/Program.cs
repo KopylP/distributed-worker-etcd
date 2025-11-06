@@ -4,6 +4,8 @@ using dotnet_etcd.DependencyInjection;
 
 var builder = WebApplication.CreateBuilder(args);
 
+builder.Configuration.AddEnvironmentVariables(prefix: "DW_");
+
 var etcdConnectionString = builder.Configuration.GetConnectionString("Etcd");
 
 builder.Services.AddEtcdClient(options => {

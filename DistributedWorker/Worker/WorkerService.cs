@@ -103,7 +103,7 @@ public class WorkerService(
         log.LogInformation("Node {node} processing {count} segments: [{segments}]",
             state.NodeId, segments.Count, string.Join(", ", segments));
 
-        await Task.Delay(500, token); // Імітація бізнес-логіки
+        await Task.Delay(500, token); // Simulate work
 
         log.LogTrace("Segments processed successfully");
     }
