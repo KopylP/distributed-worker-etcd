@@ -1,0 +1,139 @@
+#!/bin/bash
+# dw — quick container management for DistributedWorker
+# Usage: ./dw <command> [args]
+
+set -e
+
+PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
+COMPOSE="docker compose -f $PROJECT_DIR/docker-compose.yml"
+SERVICE="distributed-worker"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+usage() {
+  echo -e "${BOLD}dw${NC} — DistributedWorker container helper\n"
+  echo -e "  ${CYAN}./dw ls${NC}              List running containers"
+  echo -e "  ${CYAN}./dw logs [N]${NC}         Tail logs (container N or all)"
+  echo -e "  ${CYAN}./dw kill N${NC}           Kill container N"
+  echo -e "  ${CYAN}./dw add [COUNT]${NC}      Scale up by COUNT (default 1)"
+  echo -e "  ${CYAN}./dw exec N${NC}           Shell into container N"
+  echo -e "  ${CYAN}./dw restart${NC}          Restart all containers"
+  echo ""
+}
+
+# Get container IDs for the service
+get_containers() {
+  $COMPOSE ps -q "$SERVICE" 2>/dev/null
+}
+
+get_container_count() {
+  get_containers | wc -l | tr -d ' '
+}
+
+# Resolve container N (1-based) to container ID
+resolve_container() {
+  local n=$1
+  local id
+  id=$(get_containers | sed -n "${n}p")
+  if [ -z "$id" ]; then
+    echo -e "${RED}✗ Container #$n not found.${NC} Run ${CYAN}./dw ls${NC} to see available containers." >&2
+    exit 1
+  fi
+  echo "$id"
+}
+
+cmd_ls() {
+  echo -e "${BOLD}Running containers:${NC}\n"
+  local i=1
+  for id in $(get_containers); do
+    local name
+    name=$(docker inspect --format '{{.Name}}' "$id" | sed 's/^\///')
+    local status
+    status=$(docker inspect --format '{{.State.Status}}' "$id")
+    local started
+    started=$(docker inspect --format '{{.State.StartedAt}}' "$id" | cut -d'.' -f1 | sed 's/T/ /')
+
+    if [ "$status" = "running" ]; then
+      echo -e "  ${GREEN}[$i]${NC}  $name  ${GREEN}●${NC} $status  (since $started)"
+    else
+      echo -e "  ${RED}[$i]${NC}  $name  ${RED}●${NC} $status"
+    fi
+    i=$((i + 1))
+  done
+  echo ""
+  echo -e "  Total: ${BOLD}$(get_container_count)${NC} containers"
+}
+
+cmd_logs() {
+  if [ -z "$1" ]; then
+    echo -e "${CYAN}▶ Tailing logs for ALL containers...${NC}  (Ctrl+C to stop)\n"
+    $COMPOSE logs -f --tail 50 "$SERVICE"
+  else
+    local id
+    id=$(resolve_container "$1")
+    local name
+    name=$(docker inspect --format '{{.Name}}' "$id" | sed 's/^\///')
+    echo -e "${CYAN}▶ Tailing logs for ${BOLD}$name${NC}  (Ctrl+C to stop)\n"
+    docker logs -f --tail 50 "$id"
+  fi
+}
+
+cmd_kill() {
+  if [ -z "$1" ]; then
+    echo -e "${RED}✗ Specify container number.${NC}  Example: ${CYAN}./dw kill 3${NC}"
+    exit 1
+  fi
+  local id
+  id=$(resolve_container "$1")
+  local name
+  name=$(docker inspect --format '{{.Name}}' "$id" | sed 's/^\///')
+  echo -e "${YELLOW}⚡ Stopping ${BOLD}$name${NC}..."
+  docker stop "$id" > /dev/null
+  echo -e "${RED}✗ Container #$1 stopped.${NC}  Remaining: $(get_container_count)"
+}
+
+cmd_add() {
+  local count=${1:-1}
+  local current
+  current=$(get_container_count)
+  local target=$((current + count))
+  echo -e "${GREEN}⊕ Scaling ${BOLD}$SERVICE${NC} from ${BOLD}$current${NC} → ${BOLD}$target${NC} containers..."
+  $COMPOSE up -d --scale "$SERVICE=$target" --no-recreate
+  echo -e "${GREEN}✓ Done.${NC} Now running: ${BOLD}$(get_container_count)${NC} containers"
+}
+
+cmd_exec() {
+  if [ -z "$1" ]; then
+    echo -e "${RED}✗ Specify container number.${NC}  Example: ${CYAN}./dw exec 1${NC}"
+    exit 1
+  fi
+  local id
+  id=$(resolve_container "$1")
+  local name
+  name=$(docker inspect --format '{{.Name}}' "$id" | sed 's/^\///')
+  echo -e "${CYAN}▶ Entering ${BOLD}$name${NC}...\n"
+  docker exec -it "$id" /bin/sh -c "command -v bash >/dev/null && exec bash || exec sh"
+}
+
+cmd_restart() {
+  echo -e "${YELLOW}↻ Restarting all containers...${NC}"
+  $COMPOSE restart "$SERVICE"
+  echo -e "${GREEN}✓ All containers restarted.${NC}"
+}
+
+# --- Main ---
+case "${1:-}" in
+  ls|list)    cmd_ls ;;
+  logs|log)   cmd_logs "$2" ;;
+  kill)       cmd_kill "$2" ;;
+  add|scale)  cmd_add "$2" ;;
+  exec|sh)    cmd_exec "$2" ;;
+  restart)    cmd_restart ;;
+  *)          usage ;;
+esac

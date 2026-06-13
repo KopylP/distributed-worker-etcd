@@ -15,27 +15,33 @@ public class LeaderElectionService(
 {
     private readonly ClusterOptions _options = options.Value;
 
+    private static readonly TimeSpan InitialRetryDelay = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan MaxRetryDelay = TimeSpan.FromSeconds(30);
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         log.LogInformation("LeaderElection starting for node {node}", state.NodeId);
-        
+
+        var retryDelay = InitialRetryDelay;
+
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
-                if (!state.HasLease())
+                // Wait reactively for a lease instead of polling
+                await state.WaitForLeaseAsync(stoppingToken);
+
+                if (state.IsLeader())
                 {
-                    if (state.IsLeader())
-                    {
-                        log.LogWarning("Node {node} lost lease while being leader", state.NodeId);
-                        state.LoseLeadership();
-                    }
-                    
-                    await Task.Delay(_options.ElectionLoopDelaySeconds, stoppingToken);
-                    continue;
+                    // Shouldn't happen, but guard against stale state
+                    log.LogWarning("Node {node} still marked as leader before campaign", state.NodeId);
+                    state.LoseLeadership();
                 }
 
                 await ParticipateInElectionAsync(stoppingToken);
+
+                // Reset backoff on successful election cycle
+                retryDelay = InitialRetryDelay;
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -45,14 +51,18 @@ public class LeaderElectionService(
             {
                 log.LogError(ex, "Unexpected error during election");
                 state.LoseLeadership();
-                await Task.Delay(_options.ElectionLoopDelaySeconds, stoppingToken);
+
+                // Exponential backoff instead of fixed delay
+                await Task.Delay(retryDelay, stoppingToken);
+                retryDelay = TimeSpan.FromTicks(
+                    Math.Min(retryDelay.Ticks * 2, MaxRetryDelay.Ticks));
             }
         }
     }
 
     private async Task ParticipateInElectionAsync(CancellationToken token)
     {
-        log.LogInformation("Node {node} joining election with lease {lease}", 
+        log.LogInformation("Node {node} joining election with lease {lease}",
             state.NodeId, state.GetLeaseId());
 
         try
@@ -64,24 +74,21 @@ public class LeaderElectionService(
                 Lease = state.GetLeaseId()
             };
 
-            await etcd.CampaignAsync(campaignRequest, cancellationToken: token);
-            
+            var response = await etcd.CampaignAsync(campaignRequest, cancellationToken: token);
+
+            // Store the LeaderKey from CampaignResponse for proper resignation
+            state.SetLeaderKey(response.Leader);
             state.BecomeLeader();
             log.LogInformation("Node {node} became LEADER", state.NodeId);
-            await WaitForLeadershipLossAsync(token);
+
+            // Wait reactively until leadership is lost (lease lost or flag cleared)
+            await state.WaitForLeadershipLossAsync(token);
         }
         finally
         {
+            state.SetLeaderKey(null);
             state.LoseLeadership();
             log.LogInformation("Node {node} is no longer leader", state.NodeId);
-        }
-    }
-
-    private async Task WaitForLeadershipLossAsync(CancellationToken token)
-    {
-        while (state.HasLease() && state.IsLeader() &&  !token.IsCancellationRequested)
-        {
-            await Task.Delay(_options.ElectionLoopDelaySeconds, token);
         }
     }
 
@@ -93,17 +100,20 @@ public class LeaderElectionService(
         {
             try
             {
-                await etcd.ResignAsync(new ResignRequest
+                var leaderKey = state.GetLeaderKey();
+                if (leaderKey != null)
                 {
-                    Leader = new LeaderKey
+                    await etcd.ResignAsync(new ResignRequest
                     {
-                        Name = ByteString.CopyFromUtf8(Constants.ElectionPrefix),
-                        Key = ByteString.CopyFromUtf8(state.NodeId),
-                        Lease = state.GetLeaseId()
-                    }
-                }, cancellationToken: cancellationToken);
-                
-                log.LogInformation("Node {node} resigned from leadership", state.NodeId);
+                        Leader = leaderKey
+                    }, cancellationToken: cancellationToken);
+
+                    log.LogInformation("Node {node} resigned from leadership", state.NodeId);
+                }
+                else
+                {
+                    log.LogWarning("Node {node} is leader but has no stored LeaderKey — cannot resign properly", state.NodeId);
+                }
             }
             catch (Exception ex)
             {

@@ -4,6 +4,6 @@
       context: .
       dockerfile: DistributedWorker/Dockerfile
     deploy:
-      replicas: 3
+      replicas: 4
     environment:
       - DW_ConnectionStrings__Etcd=http://host.docker.internal:2379

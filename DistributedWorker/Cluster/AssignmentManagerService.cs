@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Threading.Channels;
 using DistributedWorker.Services;
 using dotnet_etcd.interfaces;
 using Etcdserverpb;
@@ -20,7 +21,11 @@ public class AssignmentManagerService(
     {
         log.LogInformation("AssignmentManager starting for node {node}", state.NodeId);
 
-        await foreach (var _ in state.ClusterChanged.ReadAllAsync(stoppingToken))
+        // Merge membership and leadership channels since both require re-assignment
+        var clusterChanged = MergeChannels(
+            state.MembershipChanged, state.LeadershipChanged, stoppingToken);
+
+        await foreach (var _ in clusterChanged.ReadAllAsync(stoppingToken))
         {
             if (!state.IsLeader()) continue;
             
@@ -33,7 +38,7 @@ public class AssignmentManagerService(
     {
         try
         {
-            var nodes = state.GetKnownNodes();
+            var nodes = state.GetKnownNodes().OrderBy(n => n).ToList();
 
             if (nodes.Count == 0)
             {
@@ -59,6 +64,40 @@ public class AssignmentManagerService(
         catch (Exception ex)
         {
             log.LogError(ex, "Failed to refresh assignments");
+        }
+    }
+
+    /// <summary>
+    /// Merges two ChannelReaders into one, forwarding values from both into a single output channel.
+    /// </summary>
+    private static ChannelReader<bool> MergeChannels(
+        ChannelReader<bool> channel1,
+        ChannelReader<bool> channel2,
+        CancellationToken token)
+    {
+        var merged = Channel.CreateUnbounded<bool>();
+
+        _ = ForwardChannel(channel1, merged.Writer, token);
+        _ = ForwardChannel(channel2, merged.Writer, token);
+
+        return merged.Reader;
+
+        static async Task ForwardChannel(
+            ChannelReader<bool> source,
+            ChannelWriter<bool> target,
+            CancellationToken ct)
+        {
+            try
+            {
+                await foreach (var item in source.ReadAllAsync(ct))
+                {
+                    target.TryWrite(item);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // Expected on shutdown
+            }
         }
     }
 }

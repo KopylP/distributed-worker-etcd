@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.Threading.Channels;
+using V3Electionpb;
 
 namespace DistributedWorker.Cluster;
 
@@ -11,9 +12,17 @@ public class ClusterState
     private long _leaseId;
     private bool _hasLease;
     private bool _isLeader;
+    private LeaderKey? _leaderKey;
 
-    private readonly Channel<bool> _clusterChanged = Channel.CreateUnbounded<bool>();
-    private readonly Channel<bool> _processingStateChanged = Channel.CreateUnbounded<bool>();
+    // --- Split channels by concern (Phase 2, Issue #4) ---
+    private readonly Channel<bool> _membershipChanged = Channel.CreateUnbounded<bool>();
+    private readonly Channel<bool> _leadershipChanged = Channel.CreateUnbounded<bool>();
+    private readonly Channel<bool> _segmentsChanged = Channel.CreateUnbounded<bool>();
+    private readonly Channel<bool> _leaseStateChanged = Channel.CreateUnbounded<bool>();
+
+    // --- Point-to-point signals for election service (Phase 1) ---
+    private TaskCompletionSource _leaseAcquired = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private TaskCompletionSource _leadershipLost = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     public string NodeId { get; } =
         Environment.GetEnvironmentVariable("NODE_ID")
@@ -49,6 +58,18 @@ public class ClusterState
             return [.._mySegments];
     }
 
+    public LeaderKey? GetLeaderKey()
+    {
+        lock (_lock)
+            return _leaderKey;
+    }
+
+    public void SetLeaderKey(LeaderKey? key)
+    {
+        lock (_lock)
+            _leaderKey = key;
+    }
+
     public void SetupLease(long leaseId)
     {
         SetLeaseId(leaseId);
@@ -59,6 +80,7 @@ public class ClusterState
     {
         SetHasLease(false);
         SetLeaseId(0);
+        RemoveKnownNode(NodeId);
     }
 
     public void BecomeLeader() => SetIsLeader(true);
@@ -77,7 +99,7 @@ public class ClusterState
         }
 
         if (changed)
-            _processingStateChanged.Writer.TryWrite(true);
+            _segmentsChanged.Writer.TryWrite(true);
     }
 
     public void AddKnownNode(string nodeId)
@@ -87,7 +109,7 @@ public class ClusterState
             added = _knownNodes.Add(nodeId);
 
         if (added)
-            _clusterChanged.Writer.TryWrite(true);
+            _membershipChanged.Writer.TryWrite(true);
     }
 
     public void RemoveKnownNode(string nodeId)
@@ -97,11 +119,50 @@ public class ClusterState
             removed = _knownNodes.Remove(nodeId);
 
         if (removed)
-            _clusterChanged.Writer.TryWrite(true);
+            _membershipChanged.Writer.TryWrite(true);
     }
 
-    public ChannelReader<bool> ClusterChanged => _clusterChanged.Reader;
-    public ChannelReader<bool> ProcessingStateChanged => _processingStateChanged.Reader;
+    // --- Channel readers (split by concern) ---
+    public ChannelReader<bool> MembershipChanged => _membershipChanged.Reader;
+    public ChannelReader<bool> LeadershipChanged => _leadershipChanged.Reader;
+    public ChannelReader<bool> SegmentsChanged => _segmentsChanged.Reader;
+    public ChannelReader<bool> LeaseStateChanged => _leaseStateChanged.Reader;
+
+    // --- Reactive wait methods for LeaderElectionService (Phase 1) ---
+
+    /// <summary>
+    /// Blocks until a lease is acquired. Used by LeaderElectionService
+    /// to avoid polling for lease availability.
+    /// </summary>
+    public Task WaitForLeaseAsync(CancellationToken token)
+    {
+        TaskCompletionSource tcs;
+        lock (_lock)
+        {
+            if (_hasLease)
+                return Task.CompletedTask;
+            tcs = _leaseAcquired;
+        }
+        return tcs.Task.WaitAsync(token);
+    }
+
+    /// <summary>
+    /// Blocks until leadership is lost (lease lost or leadership flag cleared).
+    /// Used by LeaderElectionService after winning an election.
+    /// </summary>
+    public Task WaitForLeadershipLossAsync(CancellationToken token)
+    {
+        TaskCompletionSource tcs;
+        lock (_lock)
+        {
+            if (!_hasLease || !_isLeader)
+                return Task.CompletedTask;
+            // Reset the TCS so we can await it fresh
+            _leadershipLost = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            tcs = _leadershipLost;
+        }
+        return tcs.Task.WaitAsync(token);
+    }
 
     private void SetLeaseId(long value)
     {
@@ -119,8 +180,26 @@ public class ClusterState
                 _hasLease = value;
         }
 
-        if (changed)
-            _processingStateChanged.Writer.TryWrite(true);
+        if (!changed) return;
+
+        _leaseStateChanged.Writer.TryWrite(true);
+
+        if (value)
+        {
+            // Signal that a lease was acquired — wake up election service
+            lock (_lock)
+            {
+                _leaseAcquired.TrySetResult();
+                // Prepare for next cycle
+                _leaseAcquired = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            }
+        }
+        else
+        {
+            // Lease lost — signal leadership loss
+            lock (_lock)
+                _leadershipLost.TrySetResult();
+        }
     }
 
     private void SetIsLeader(bool value)
@@ -133,7 +212,15 @@ public class ClusterState
                 _isLeader = value;
         }
 
-        if (changed)
-            _clusterChanged.Writer.TryWrite(true);
+        if (!changed) return;
+
+        _leadershipChanged.Writer.TryWrite(true);
+
+        if (!value)
+        {
+            // Leadership explicitly lost — signal to WaitForLeadershipLossAsync
+            lock (_lock)
+                _leadershipLost.TrySetResult();
+        }
     }
 }

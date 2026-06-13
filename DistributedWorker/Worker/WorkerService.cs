@@ -1,5 +1,6 @@
 using DistributedWorker.Cluster;
 using Microsoft.Extensions.Options;
+using System.Threading.Channels;
 
 namespace DistributedWorker.Worker;
 
@@ -16,32 +17,70 @@ public class WorkerService(
         log.LogInformation("Worker starting for node {node}", state.NodeId);
 
         CancellationTokenSource? processingCts = null;
+        Task? processingTask = null;
 
-        await foreach (var _ in state.ProcessingStateChanged.ReadAllAsync(stoppingToken))
+        try
         {
-            await CancelPreviousProcessingAsync(processingCts);
+            // Merge the two channels the worker cares about: lease and segments
+            var merged = MergeChannels(state.LeaseStateChanged, state.SegmentsChanged, stoppingToken);
 
-            if (!state.HasLease())
+            await foreach (var _ in merged.ReadAllAsync(stoppingToken))
             {
-                log.LogWarning("Node {node} lost lease — waiting to reacquire...", state.NodeId);
-                continue;
+                // Cancel and dispose previous processing
+                if (processingCts != null)
+                {
+                    await processingCts.CancelAsync();
+
+                    // Await the task so we observe any exceptions
+                    if (processingTask != null)
+                    {
+                        try
+                        {
+                            await processingTask;
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            // Expected when cancelling
+                        }
+                    }
+
+                    processingCts.Dispose();
+                    processingCts = null;
+                    processingTask = null;
+                }
+
+                if (!state.HasLease())
+                {
+                    log.LogWarning("Node {node} lost lease — waiting to reacquire...", state.NodeId);
+                    continue;
+                }
+
+                processingCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+                processingTask = RunProcessingLoopAsync(processingCts.Token);
             }
-
-            processingCts = StartNewProcessingLoop(stoppingToken);
         }
-    }
+        finally
+        {
+            // Cleanup on shutdown
+            if (processingCts != null)
+            {
+                await processingCts.CancelAsync();
 
-    private static async Task CancelPreviousProcessingAsync(CancellationTokenSource? cts)
-    {
-        if (cts != null)
-            await cts.CancelAsync();
-    }
+                if (processingTask != null)
+                {
+                    try
+                    {
+                        await processingTask;
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // Expected
+                    }
+                }
 
-    private CancellationTokenSource StartNewProcessingLoop(CancellationToken stoppingToken)
-    {
-        var cts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-        _ = RunProcessingLoopAsync(cts.Token);
-        return cts;
+                processingCts.Dispose();
+            }
+        }
     }
 
     private async Task RunProcessingLoopAsync(CancellationToken token)
@@ -106,5 +145,39 @@ public class WorkerService(
         await Task.Delay(500, token); // Simulate work
 
         log.LogTrace("Segments processed successfully");
+    }
+
+    /// <summary>
+    /// Merges two ChannelReaders into one, forwarding values from both into a single output channel.
+    /// </summary>
+    private static ChannelReader<bool> MergeChannels(
+        ChannelReader<bool> channel1,
+        ChannelReader<bool> channel2,
+        CancellationToken token)
+    {
+        var merged = Channel.CreateUnbounded<bool>();
+
+        _ = ForwardChannel(channel1, merged.Writer, token);
+        _ = ForwardChannel(channel2, merged.Writer, token);
+
+        return merged.Reader;
+
+        static async Task ForwardChannel(
+            ChannelReader<bool> source,
+            ChannelWriter<bool> target,
+            CancellationToken ct)
+        {
+            try
+            {
+                await foreach (var item in source.ReadAllAsync(ct))
+                {
+                    target.TryWrite(item);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // Expected on shutdown
+            }
+        }
     }
 }
